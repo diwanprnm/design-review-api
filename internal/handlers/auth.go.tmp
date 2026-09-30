@@ -1,0 +1,71 @@
+// registerRequest memetakan body JSON ke struct Go (tidak berubah dari versi pgx).
+// Tag `json` = nama field di JSON, tag `binding` = validasi otomatis Gin.
+type registerRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required,min=8"`
+	Name     string `json:"name" binding:"required,min=2"`
+}
+
+// Register: POST /api/v1/auth/register {email,password,name} -> 201 {designer}
+// Versi GORM: tanpa SQL string, tanpa $1/$2/$3, tanpa Scan.
+func (h *Handler) Register(c *gin.Context) {
+	// 1. Parse + validasi body JSON. Gagal -> 400. (Sama seperti sebelumnya.)
+	var req registerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"code": "invalid_input", "message": err.Error()},
+		})
+		return
+	}
+
+	// 2. Normalisasi input. (Sama seperti sebelumnya.)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": gin.H{"code": "invalid_input", "message": "name must not be empty"},
+		})
+		return
+	}
+
+	// 3. Hash password dengan bcrypt. (Sama seperti sebelumnya.)
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{"code": "internal", "message": "failed to hash password"},
+		})
+		return
+	}
+
+	// 4. Simpan via GORM — bandingkan dengan versi pgx kemarin:
+	//    pgx : QueryRow("INSERT ... VALUES ($1,$2,$3) RETURNING ...").Scan(&d.ID, ...)
+	//    GORM: isi struct -> Create -> ID & CreatedAt terisi otomatis.
+	//    GORM menggenerate INSERT + RETURNING sendiri dari tag struct.
+	//    WithContext meneruskan context HTTP (client batal -> query batal),
+	//    .Error mengambil error dari rantai method GORM.
+	d := models.Designer{
+		Email:        email,
+		PasswordHash: string(hash),
+		Name:         name,
+	}
+	if err := h.DB.WithContext(c.Request.Context()).Create(&d).Error; err != nil {
+		// 5. Email duplikat: driver postgres GORM tetap memakai pgx di
+		// bawahnya, jadi kode 23505 (unique_violation) masih terdeteksi
+		// dengan errors.As yang sama persis seperti versi pgx.
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": gin.H{"code": "email_taken", "message": "email already registered"},
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": gin.H{"code": "internal", "message": "failed to create designer"},
+		})
+		return
+	}
+
+	// 6. Sukses -> 201. Field PasswordHash punya tag json:"-"
+	// (lihat models.go), jadi hash tidak ikut terkirim ke client.
+	c.JSON(http.StatusCreated, gin.H{"designer": d})
+}

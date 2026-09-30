@@ -1,0 +1,127 @@
+package handlers
+
+import (
+	"designreview/internal/models"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+)
+
+// registerRequest memetakan body JSON ke struct Go (tidak berubah dari versi pgx).
+// Tag `json` = nama field di JSON, tag `binding` = validasi otomatis Gin.
+type registerRequest struct{
+	Email string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required,min=8"`
+	Name string `json:"name" binding:"required,min=2"`
+}
+
+// Register: POST /api/v1/auth/register {email,password,name} -> 201 {designer}
+// Versi GORM: tanpa SQL string, tanpa $1/$2/$3, tanpa Scan.
+func (h *Handler) Register(c *gin.Context) {
+	// 1. Parse + validasi body JSON. Gagal -> 400. (Sama seperti sebelumnya.)
+	
+	var req registerRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, "invalid_input", err.Error(), nil)
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		BadRequest(c, "invalid_input", "name must not be empty", nil)
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "internal", "failed to hash password", nil)
+		return
+	}
+
+	d := models.Designer{
+		Email: email,
+		PasswordHash: string(hash),
+		Name: name,
+	}
+
+	if err := h.DB.WithContext(c.Request.Context()).Create(&d).Error; err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			Fail(c, http.StatusConflict, "email_taken", "email already exist", nil)
+			return
+		}
+		Fail(c, http.StatusInternalServerError, "internal", "failed to create designer", nil)
+		return
+	}
+
+	//berhasil
+	Created(c, "Designer registered successfully", gin.H{"designer": d})
+}
+
+type requestLogin struct{
+	Email string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+// Login: POST /api/v1/auth/login {email,password} -> 200 {token, designer}
+func (h *Handler) Login(c *gin.Context) {
+	// 1. Parse + validasi body JSON.
+	var req requestLogin
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, "invalid_input", err.Error(), nil)
+		return
+	}
+
+	// 2. Normalisasi email (sama seperti Register).
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	if email == "" {
+		BadRequest(c, "invalid_input", "email must not be empty", nil)
+		return
+	}
+
+	// 3. Cari designer via GORM. Email salah vs password salah
+	// dibalas pesan yang SAMA (anti user enumeration).
+	var designer models.Designer
+	if err := h.DB.WithContext(c.Request.Context()).
+		Where("email = ?", email).
+		First(&designer).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			Fail(c, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
+			return
+		}
+		Fail(c, http.StatusInternalServerError, "internal", "failed to fetch designer", nil)
+		return
+	}
+
+	// 4. Bandingkan password dengan bcrypt hash.
+	if err := bcrypt.CompareHashAndPassword([]byte(designer.PasswordHash), []byte(req.Password)); err != nil {
+		Fail(c, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
+		return
+	}
+
+	// 5. Terbitkan JWT 7 hari. Claim "designer_id" dibaca middleware.RequireDesigner.
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"designer_id": designer.ID,
+		"exp":         now.Add(7 * 24 * time.Hour).Unix(),
+		"iat":         now.Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(h.Cfg.JWTSecret))
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "internal", "failed to sign token", nil)
+		return
+	}
+
+	OK(c, "Login successful", gin.H{"token": signed, "designer": designer})
+}
+
+// Me: GET /api/v1/me — stub, mengembalikan designer dari JWT setelah auth jadi.
+func (h *Handler) Me(c *gin.Context) { notImplemented(c) }
