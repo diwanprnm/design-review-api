@@ -17,7 +17,11 @@ type Designer struct {
 }
 
 type Project struct {
-	ID             string    `json:"id"`
+	// Tag gorm di ID wajib: tanpa `default:gen_random_uuid()`, GORM ikut
+	// mengirim id = '' ke kolom UUID dan Postgres menolaknya.
+	ID             string    `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	// OwnerID internal — tidak pernah dikirim ke client (docs/api.md:40).
+	OwnerID        string    `json:"-"`
 	Name           string    `json:"name"`
 	Description    string    `json:"description"`
 	ShareToken     *string   `json:"share_token,omitempty"`
@@ -26,13 +30,15 @@ type Project struct {
 }
 
 type Design struct {
-	ID            string         `json:"id"`
+	ID            string         `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
 	ProjectID     string         `json:"project_id"`
 	Title         string         `json:"title"`
 	Description   string         `json:"description"`
 	CreatedAt     time.Time      `json:"created_at"`
 	UpdatedAt     time.Time      `json:"updated_at"`
-	LatestVersion *VersionBrief  `json:"latest_version,omitempty"`
+	// gorm:"-" -> bukan kolom DB. Diisi manual dari query versions; tanpa tag ini
+	// GORM menganggapnya relasi dan men-generate JOIN otomatis.
+	LatestVersion *VersionBrief  `gorm:"-" json:"latest_version,omitempty"`
 }
 
 type VersionBrief struct {
@@ -41,10 +47,14 @@ type VersionBrief struct {
 }
 
 type Version struct {
-	ID        string    `json:"id"`
-	DesignID  string    `json:"design_id"`
-	Number    int       `json:"number"`
-	ImageURL  string    `json:"image_url"`
+	ID       string    `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	DesignID string    `json:"design_id"`
+	Number   int       `json:"number"`
+	// Kolom DB bernama object_key (0001_init.sql:44), bukan image_url.
+	ObjectKey string    `gorm:"column:object_key" json:"-"`
+	// image_url adalah presigned URL yang di-generate saat response (docs/api.md:46),
+	// bukan kolom DB -> gorm:"-" agar tidak ikut di-SELECT.
+	ImageURL  string    `gorm:"-" json:"image_url"`
 	Width     int       `json:"width"`
 	Height    int       `json:"height"`
 	CreatedAt time.Time `json:"created_at"`

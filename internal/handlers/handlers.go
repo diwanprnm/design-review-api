@@ -44,9 +44,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		{
 			auth.GET("/me", h.Me)
 
-			auth.GET("/projects", notImplemented)
-			auth.POST("/projects", notImplemented)
-			auth.GET("/projects/:projectId", notImplemented)
+			auth.GET("/projects", h.GetAllProjects)
+			auth.POST("/projects", h.CreateProject)
+			auth.GET("/projects/:projectId", h.GetProject)
 			auth.PATCH("/projects/:projectId", notImplemented)
 			auth.DELETE("/projects/:projectId", notImplemented)
 

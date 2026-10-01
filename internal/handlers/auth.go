@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"designreview/internal/middleware"
 	"designreview/internal/models"
 	"errors"
 	"net/http"
@@ -67,61 +68,83 @@ func (h *Handler) Register(c *gin.Context) {
 }
 
 type requestLogin struct{
-	Email string `json:"email" binding:"required"`
+	Email string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required"`
 }
 // Login: POST /api/v1/auth/login {email,password} -> 200 {token, designer}
 func (h *Handler) Login(c *gin.Context) {
-	// 1. Parse + validasi body JSON.
 	var req requestLogin
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil{
 		BadRequest(c, "invalid_input", err.Error(), nil)
 		return
 	}
 
-	// 2. Normalisasi email (sama seperti Register).
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	if email == "" {
-		BadRequest(c, "invalid_input", "email must not be empty", nil)
+	if email == ""{
+		BadRequest(c, "invalid_input", "name must not be empty", nil)
 		return
 	}
 
-	// 3. Cari designer via GORM. Email salah vs password salah
-	// dibalas pesan yang SAMA (anti user enumeration).
 	var designer models.Designer
-	if err := h.DB.WithContext(c.Request.Context()).
-		Where("email = ?", email).
-		First(&designer).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			Fail(c, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
-			return
-		}
-		Fail(c, http.StatusInternalServerError, "internal", "failed to fetch designer", nil)
-		return
-	}
+	if err:= h.DB.WithContext(c.Request.Context()).
+			Where("email = ?", email).
+			First(&designer).Error; err != nil{
+				if errors.Is(err, gorm.ErrRecordNotFound){
+					Fail(c, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
+					return
+				}
 
-	// 4. Bandingkan password dengan bcrypt hash.
-	if err := bcrypt.CompareHashAndPassword([]byte(designer.PasswordHash), []byte(req.Password)); err != nil {
+			Fail(c, http.StatusInternalServerError, "internal","failed to fetch designer", nil)
+			return
+			}
+
+	// CompareHashAndPassword(hashedPassword, plainPassword) — argumen hash dulu.
+	if err:= bcrypt.CompareHashAndPassword([]byte(designer.PasswordHash), []byte(req.Password)); err!=nil{
 		Fail(c, http.StatusUnauthorized, "invalid_credentials", "invalid email or password", nil)
 		return
 	}
 
-	// 5. Terbitkan JWT 7 hari. Claim "designer_id" dibaca middleware.RequireDesigner.
 	now := time.Now()
 	claims := jwt.MapClaims{
 		"designer_id": designer.ID,
-		"exp":         now.Add(7 * 24 * time.Hour).Unix(),
-		"iat":         now.Unix(),
+		"exp": now.Add(7 * 24 * time.Hour).Unix(),
+		"iat": now.Unix(),
 	}
+
+	// HS256 karena secret berupa string ([]byte). ES256 butuh ECDSA private key
+	// dan akan selalu gagal di SignedString dengan []byte.
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString([]byte(h.Cfg.JWTSecret))
-	if err != nil {
+	if err != nil{
 		Fail(c, http.StatusInternalServerError, "internal", "failed to sign token", nil)
 		return
 	}
 
-	OK(c, "Login successful", gin.H{"token": signed, "designer": designer})
+	OK(c, "Login Succesfull", gin.H{"token": signed, "designer": designer})
+
 }
 
-// Me: GET /api/v1/me — stub, mengembalikan designer dari JWT setelah auth jadi.
-func (h *Handler) Me(c *gin.Context) { notImplemented(c) }
+// Me: GET /api/v1/me — mengembalikan designer yang sedang login.
+// Route ini berada di belakang middleware.RequireDesigner, yang sudah
+// memverifikasi JWT dan menaruh id designer di context (middleware.DesignerIDKey).
+func (h *Handler) Me(c *gin.Context) {
+	DesignerID := c.GetString(middleware.DesignerIDKey);
+	if DesignerID == ""{
+		Fail(c, http.StatusUnauthorized, "unauthorized", "missing designer identity", nil)
+		return
+	}
+
+	var designer models.Designer
+	if err := h.DB.WithContext(c.Request.Context()).
+		       Where("id = ?", DesignerID). 
+			   First(&designer).Error; err != nil{
+				if errors.Is(err, gorm.ErrRecordNotFound){
+					Fail(c, http.StatusUnauthorized, "unauthorized", "designer not found", nil)
+					return
+				}	
+				Fail(c, http.StatusInternalServerError, "internal", "failed to get designer", nil)
+				return
+			   }
+	
+	OK(c, "OK", gin.H{"designer":designer })
+}
